@@ -391,3 +391,141 @@ process_video(video_path, output_path, yolo_model, confidence, classes)
 
 # Download the processed video
 files.download(output_path)
+
+# ## Real-time Visualization in Colab Notebook
+
+# Import libraries for real-time visualization
+from IPython.display import display, clear_output, HTML
+import matplotlib.pyplot as plt
+import time
+import io
+from PIL import Image
+import base64
+
+def process_video_realtime(video_path, yolo_model="yolov8n.pt", confidence=0.3, classes=None, 
+                          display_width=1200, update_interval=1):
+    """Process video with real-time visualization in Colab notebook"""
+    
+    # Extract background for calibration
+    print("Extracting background for calibration...")
+    background = calcBackground(video_path)
+    
+    # Get ROI
+    print("Select ROI (Region of Interest):")
+    roi, roi_coords = getROI(background)
+    
+    if roi is None:
+        print("ROI selection failed. Using full frame.")
+        roi = background
+        h, w = background.shape[:2]
+        roi_coords = [[0, 0], [w, h]]
+    
+    # Perform manual calibration
+    print("Select 4 points that form a rectangle in the real world:")
+    bev_coords, bev_size = manualCalibration(roi)
+    
+    # Initialize tracker
+    tracker = ObjectTracker(yolo_model=yolo_model, confidence=confidence, classes=classes)
+    tracker.set_bev_calibration(bev_coords, bev_size)
+    
+    # Setup HTML display
+    display_id = display(HTML(f'<h3>Initializing tracking...</h3>'), display_id=True)
+    
+    # Process video
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    # Calculate aspect ratio for display
+    aspect_ratio = height / width
+    display_height = int(display_width * aspect_ratio / 2)  # Divide by 2 because we'll have two frames side by side
+    
+    # Create a 2D grid for BEV visualization
+    grid_size = 20  # Number of grid cells in each dimension
+    
+    # Track object positions over time
+    object_positions = {}  # {track_id: [(x1, y1), (x2, y2), ...]}
+    
+    frame_count = 0
+    last_update_time = time.time()
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        # Apply ROI if needed
+        if roi_coords:
+            x1, y1 = roi_coords[0]
+            x2, y2 = roi_coords[1]
+            frame_roi = frame[y1:y2, x1:x2]
+        else:
+            frame_roi = frame
+        
+        # Process frame
+        result_frame, bev_frame = tracker.process_frame(frame_roi)
+        
+        # Update at specified interval
+        current_time = time.time()
+        if current_time - last_update_time >= update_interval:
+            # Create BEV visualization with grid
+            if bev_frame is not None:
+                # Add grid to BEV frame
+                h, w = bev_frame.shape[:2]
+                cell_h, cell_w = h // grid_size, w // grid_size
+                
+                # Draw grid lines
+                for i in range(grid_size + 1):
+                    cv2.line(bev_frame, (0, i * cell_h), (w, i * cell_h), (50, 50, 50), 1)
+                    cv2.line(bev_frame, (i * cell_w, 0), (i * cell_w, h), (50, 50, 50), 1)
+                
+                # Combine frames side by side
+                combined_frame = np.zeros((max(result_frame.shape[0], bev_frame.shape[0]), 
+                                          result_frame.shape[1] + bev_frame.shape[1], 3), dtype=np.uint8)
+                combined_frame[:result_frame.shape[0], :result_frame.shape[1]] = result_frame
+                combined_frame[:bev_frame.shape[0], result_frame.shape[1]:] = bev_frame
+            else:
+                combined_frame = result_frame
+            
+            # Convert to PIL Image for display
+            combined_frame_rgb = cv2.cvtColor(combined_frame, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(combined_frame_rgb)
+            
+            # Resize for display
+            display_size = (display_width, int(display_width * combined_frame.shape[0] / combined_frame.shape[1]))
+            pil_img = pil_img.resize(display_size, Image.LANCZOS)
+            
+            # Convert to base64 for HTML display
+            buffer = io.BytesIO()
+            pil_img.save(buffer, format='JPEG')
+            img_str = base64.b64encode(buffer.getvalue()).decode('ascii')
+            
+            # Update display
+            display_id.update(HTML(f'<img src="data:image/jpeg;base64,{img_str}" />'))
+            
+            last_update_time = current_time
+        
+        frame_count += 1
+        
+        # Break on ESC key (only works when OpenCV window is in focus)
+        if cv2.waitKey(1) & 0xFF == 27:
+            break
+    
+    cap.release()
+    cv2.destroyAllWindows()
+    print("Processing complete!")
+
+# Example usage
+def run_realtime_visualization():
+    # Set YOLO model and confidence threshold
+    yolo_model = "yolov8n.pt"
+    confidence = 0.3
+    classes = [0, 2, 3, 5, 7]  # person, car, motorcycle, bus, truck
+    
+    # Process video with real-time display
+    process_video_realtime(video_path, yolo_model, confidence, classes, 
+                          display_width=1000, update_interval=0.5)
+
+# Run the real-time visualization
+run_realtime_visualization()
